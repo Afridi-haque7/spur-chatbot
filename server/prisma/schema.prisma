@@ -1,0 +1,53 @@
+// Prisma schema for the AI live-chat agent.
+// Provider is Postgres. Native enums + Json are used (Postgres-only features).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// The channel a conversation came in on. Live chat is the only one wired up,
+// but the enum is the seam where WhatsApp / Instagram / Messenger plug in later.
+enum Channel {
+  livechat
+  whatsapp
+  instagram
+  messenger
+}
+
+enum Sender {
+  user
+  ai
+  system
+}
+
+model Conversation {
+  id         String    @id @default(uuid())
+  channel    Channel   @default(livechat)
+  // Channel-specific identifier (e.g. a WhatsApp phone number). Null for web chat.
+  externalId String?
+  // Free-form metadata (locale, page URL, customer id, ...). Postgres jsonb.
+  metadata   Json?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  messages   Message[]
+
+  @@index([channel, externalId])
+}
+
+model Message {
+  id             String       @id @default(uuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender         Sender
+  text           String
+  // Optional token accounting, handy for cost analysis. Null when unknown.
+  tokenCount     Int?
+  createdAt      DateTime     @default(now())
+
+  @@index([conversationId, createdAt])
+}
