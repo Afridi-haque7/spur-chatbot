@@ -1,4 +1,4 @@
-import type { Channel, Conversation } from '@prisma/client';
+import type { Channel, Conversation, Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
 
 /**
@@ -15,7 +15,7 @@ export const conversationRepository = {
       data: {
         channel: input.channel ?? 'livechat',
         externalId: input.externalId ?? null,
-        metadata: input.metadata ?? undefined,
+        metadata: (input.metadata ?? undefined) as Prisma.InputJsonValue | undefined,
       },
     });
   },

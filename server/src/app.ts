@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import { config } from './config.js';
 import { AppError } from './lib/errors.js';
@@ -37,7 +37,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   registerChatRoutes(app, chatService);
 
   // Single place that turns any thrown error into a clean JSON response.
-  app.setErrorHandler((error, request, reply) => {
+  app.setErrorHandler((error: FastifyError, request, reply) => {
     if (error instanceof AppError) {
       // Expected, handled errors: log at info, surface the friendly message.
       request.log.info(
