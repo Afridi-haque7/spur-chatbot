@@ -1,241 +1,307 @@
-# Spur — AI Live Chat Agent
+# Spur 💬
 
-A mini customer-support chat app: a SvelteKit chat widget talks to a
-TypeScript backend that persists every message and calls Groq (Llama) to
-generate replies for a fictional store, **Nimbus Goods**.
+> AI live-chat support agent — streams personalized, knowledge-grounded answers
+> in real time from a channel-agnostic TypeScript backend.
+
+<!-- TODO: replace the Live Demo links with your deployed Vercel (frontend) URL -->
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-spur--chat-blue?style=flat-square)](#)
+[![SvelteKit](https://img.shields.io/badge/SvelteKit-2-FF3E00?style=flat-square&logo=svelte)](https://kit.svelte.dev)
+[![Fastify](https://img.shields.io/badge/Fastify-5-000000?style=flat-square&logo=fastify)](https://fastify.dev)
+[![Groq](https://img.shields.io/badge/Groq-Llama%203.3-F55036?style=flat-square)](https://groq.com)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript)](https://www.typescriptlang.org)
+[![Prisma](https://img.shields.io/badge/Prisma-6-2D3748?style=flat-square&logo=prisma)](https://www.prisma.io)
+[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
+
+---
+
+## What is Spur?
+
+Spur is a customer-support chat application for a fictional store, **Nimbus
+Goods**. Users ask questions in plain language and get streamed, real-time
+answers grounded in the store's knowledge base. A SvelteKit chat widget talks to
+a TypeScript backend that persists every message and uses Groq (Llama) to
+generate replies — with the AI tucked behind a clean provider interface and a
+channel-agnostic core that's ready for web, WhatsApp, or any other channel.
+
+---
+
+## ✨ Features
+
+- **Real-time streaming** — replies stream token-by-token over Server-Sent
+  Events, rendered with a paced typewriter effect so they read as natural typing,
+  not a sudden dump.
+- **Channel-agnostic core** — the orchestration layer doesn't know it's serving a
+  web widget; a WhatsApp/Instagram webhook would be just another adapter.
+- **Pluggable LLM** — the provider sits behind an interface; swapping Groq for
+  OpenAI/Anthropic is a one-file change.
+- **Durable conversations** — every message is persisted; reloads restore full
+  history from the backend.
+- **Knowledge-grounded answers** — store FAQs are injected into the system prompt
+  with guardrails (answer only from facts, admit unknowns, stay on topic).
+- **Fail-fast & safe** — env is validated at startup, and a single typed-error
+  vocabulary maps failures to friendly messages — never a leaked stack trace.
+
+---
+
+## 🏗️ Architecture
 
 ```
-web (SvelteKit)  ──HTTP──>  server (Fastify + TS)  ──>  Groq (Llama)
-                                     │
-                                     └──> Postgres (Prisma)
+                        ┌──────────────────────────────────────────┐
+   User                 │              server (Fastify)            │
+    │                   │                                          │
+    ▼                   │  routes/      validate · serialise · SSE │
+┌─────────────┐  HTTP   │      │                                   │
+│   web        │ ───────▶      ▼                                   │       ┌────────────┐
+│ (SvelteKit   │   SSE   │  services/   ChatService (core)         │ ────▶ │   Groq     │
+│  ChatWidget) │ ◀═══════│      │                                   │       │  (Llama)   │
+└─────────────┘ tokens  │      ▼                                   │       └────────────┘
+                        │  llm/        LLMProvider + Groq + prompt │
+                        │      │                                   │
+                        │      ▼                                   │       ┌────────────┐
+                        │  repositories/  Prisma data access       │ ────▶ │  Postgres  │
+                        └──────────────────────────────────────────┘       └────────────┘
+```
+
+Both chat endpoints share the same orchestration and persistence; they differ
+only in how the reply is returned (JSON vs. a stream).
+
+```
+1. Validate    body (non-empty, length cap, sessionId is a UUID if present)
+2. Resolve     conversation — load by sessionId, or create a new one
+3. Read        the last N messages as context (before inserting the new one)
+4. Persist     the user message first, so it survives an LLM failure
+5. Generate    system prompt + history + new message, with a timeout
+6. Persist     the AI reply and bump updatedAt
+7. Return      JSON (/chat/message) or stream tokens (/chat/message/stream)
 ```
 
 ---
 
-## 1. Prerequisites
+## 🛠️ Tech Stack
 
-- **Node.js 18+** (20+ recommended)
-- **PostgreSQL** running locally, or a hosted URL (Neon / Supabase / Render)
-- A **Groq API key** (free tier available at console.groq.com)
+**Frontend**
+- SvelteKit 2 (Svelte 5 runes)
+- TypeScript
+- Vite
+- Server-Sent Events client (streaming)
+
+**Backend**
+- Node.js + Fastify 5
+- TypeScript
+- Prisma ORM
+- Zod (schema validation)
+
+**AI**
+- Groq — Llama 3.3 70B (OpenAI-compatible chat completions)
+- Provider-agnostic `LLMProvider` interface
+- Token streaming over SSE
+
+**Infrastructure**
+- Vercel (frontend)
+- Render (backend)
+- PostgreSQL — Neon / Supabase / Render
 
 ---
 
-## 2. Run it locally
+## 🔧 Getting Started
 
-The repo has two apps: `server/` and `web/`. Run each in its own terminal.
+The repository contains two applications, `server/` and `web/`. Run each in its
+own terminal.
 
-### 2a. Backend
+### Prerequisites
+
+- Node.js 18+ (20 recommended)
+- A PostgreSQL connection string (local, or Neon / Supabase / Render)
+- A Groq API key — free tier at [console.groq.com](https://console.groq.com)
+
+### Installation
+
+```bash
+# Clone the repo
+git clone https://github.com/Afridi-haque7/spur-chatbot.git
+cd spur-chatbot
+```
+
+### Backend
 
 ```bash
 cd server
 npm install
 
-# configure env
-cp .env.example .env
-#  -> set DATABASE_URL to your Postgres connection string
-#  -> set GROQ_API_KEY
-#  -> (optional) set GROQ_MODEL to a model you have access to
+cp .env.example .env        # then fill in the values below
 
-# create the schema, then (optionally) seed a demo conversation
-npx prisma migrate dev --name init
-npm run db:seed        # optional
+npx prisma migrate dev --name init   # create the schema
+npm run db:seed                      # optional: one demo conversation
 
-npm run dev            # starts on http://localhost:3001
+npm run dev                 # http://localhost:3001
 ```
 
-Quick smoke test:
+**server/.env**
 
-```bash
-curl -s http://localhost:3001/health
-# {"status":"ok"}
-
-curl -s -X POST http://localhost:3001/chat/message \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"What is your return policy?"}'
-# {"reply":"...","sessionId":"..."}
+```env
+DATABASE_URL="postgresql://user:pass@host:5432/spur?schema=public"
+GROQ_API_KEY=your_groq_key
+GROQ_MODEL=llama-3.3-70b-versatile   # or llama-3.1-8b-instant for lower cost
+PORT=3001
+CORS_ORIGIN=http://localhost:5173    # comma-separated list of allowed origins
+LLM_MAX_TOKENS=512                   # cap on generated tokens per reply
+LLM_HISTORY_LIMIT=12                 # past messages sent as context
+LLM_TIMEOUT_MS=20000                 # hard timeout for the LLM call
+MAX_MESSAGE_LENGTH=4000              # longer messages are rejected
 ```
 
-### 2b. Frontend
+### Frontend
 
 ```bash
 cd web
 npm install
 
-cp .env.example .env   # PUBLIC_API_BASE_URL defaults to http://localhost:3001
+cp .env.example .env        # PUBLIC_API_BASE_URL defaults to http://localhost:3001
 
-npm run dev            # starts on http://localhost:5173
+npm run dev                 # http://localhost:5173
 ```
-
-Open <http://localhost:5173> and chat. Reload the page — the conversation
-persists (the `sessionId` is stored in `localStorage` and history is re-fetched
-from the backend).
-
----
-
-## 3. Database setup (migrations & seed)
-
-Schema lives in `server/prisma/schema.prisma` (Postgres). Two tables:
-
-- **conversations** — `id`, `channel`, `externalId`, `metadata` (jsonb), timestamps
-- **messages** — `id`, `conversationId` (FK, cascade delete), `sender` enum
-  (`user`/`ai`/`system`), `text`, `tokenCount`, `createdAt`
-
-Commands (from `server/`):
-
-| Command | What it does |
-| --- | --- |
-| `npx prisma migrate dev` | Create/apply migrations in dev |
-| `npx prisma migrate deploy` | Apply migrations in prod (no prompts) |
-| `npm run db:seed` | Insert one demo conversation |
-| `npx prisma studio` | Browse the data in a GUI |
-
-> The agent's **domain knowledge** (shipping/returns/hours) is *not* in the DB —
-> it lives in `server/src/knowledge/faq.ts` and is injected into the system
-> prompt. The seed only demonstrates message persistence.
-
----
-
-## 4. Environment variables
-
-**server/.env**
-
-| Var | Required | Default | Notes |
-| --- | --- | --- | --- |
-| `DATABASE_URL` | ✅ | — | Postgres connection string |
-| `GROQ_API_KEY` | ✅ | — | Your Groq key |
-| `GROQ_MODEL` | | `llama-3.3-70b-versatile` | Any Groq model (e.g. `llama-3.1-8b-instant` for lower cost) |
-| `PORT` | | `3001` | |
-| `CORS_ORIGIN` | | `http://localhost:5173` | Comma-separated list of allowed origins |
-| `LLM_MAX_TOKENS` | | `512` | Cap on generated tokens per reply |
-| `LLM_HISTORY_LIMIT` | | `12` | Past messages sent as context |
-| `LLM_TIMEOUT_MS` | | `20000` | Hard timeout for the LLM call |
-| `MAX_MESSAGE_LENGTH` | | `4000` | Longer messages are rejected |
 
 **web/.env**
 
-| Var | Default | Notes |
-| --- | --- | --- |
-| `PUBLIC_API_BASE_URL` | `http://localhost:3001` | Backend URL |
-
-Env is validated at startup (`server/src/config.ts`); missing/invalid values
-fail fast with a readable message instead of a confusing runtime crash.
-Secrets are never committed — `.env` is gitignored and only `.env.example`
-ships.
-
----
-
-## 5. Architecture overview
-
-### Backend layers (strict separation of concerns)
-
-```
-routes/        transport: validate input, call service, serialise output
-services/      ChatService — channel-agnostic orchestration (the core)
-llm/           LLMProvider interface + Groq implementation + prompt
-repositories/  all Prisma/SQL access (conversation, message)
-knowledge/     store FAQ data, rendered into the system prompt
-lib/           typed errors + zod validation
-config.ts      validated env   db.ts  Prisma singleton   app.ts  composition root
+```env
+PUBLIC_API_BASE_URL=http://localhost:3001   # baked in at build time
 ```
 
-Request flow for `POST /chat/message`:
-
-1. **Validate** the body (non-empty, length cap, `sessionId` is a UUID if present).
-2. **Resolve** the conversation — load by `sessionId`, or create a new one.
-3. **Read** the last *N* messages as context (before inserting the new one).
-4. **Persist the user message first**, so it survives an LLM failure.
-5. **Call the LLM** (system prompt + history + new message) with a timeout.
-6. **Persist the AI reply** (with token counts) and bump `updatedAt`.
-7. Return `{ reply, sessionId }`.
-
-### Design decisions worth calling out
-
-- **Channel-agnostic core.** `ChatService.handleIncomingMessage({ channel,
-  externalId, text })` doesn't know it's being called by a web widget. The
-  HTTP route is just one *adapter*; a WhatsApp/Instagram webhook would be
-  another adapter calling the same method. The `channel` enum and `externalId`
-  column exist now (only `livechat` is wired up) so the seam is visible in the
-  schema, not just in prose.
-- **LLM behind an interface.** Nothing outside `llm/` imports the Groq
-  SDK. Swapping providers or stubbing in a test is a one-file change, and the
-  provider is injected into the service via its constructor.
-- **One error vocabulary.** Services/LLM throw typed `AppError`s; a single
-  Fastify error handler maps them to clean JSON. Internal detail goes to logs;
-  only a friendly `userMessage` reaches the client. Unknown errors → generic
-  500, never a stack trace.
-- **Knowledge as data, not a string.** FAQs are structured so they can later
-  move to the DB or a retrieval layer without touching the prompt-building or
-  transport code. At this scale, inlining them in the system prompt is the
-  correct, boring choice — no vector search needed.
-
-### Frontend
-
-A single `ChatWidget.svelte` (Svelte 5 runes) holds message state, sends on
-Enter (Shift+Enter for newline), disables the button while a request is in
-flight, shows a typing indicator, auto-scrolls, and renders errors as both an
-inline bubble and a dismissible banner. A typed `api.ts` client wraps fetch and
-normalises backend/network errors. `sessionId` lives in `localStorage`; on load
-the widget fetches history and re-renders it.
+Open [http://localhost:5173](http://localhost:5173) and start chatting. Replies
+stream in live; reload the page and the conversation persists.
 
 ---
 
-## 6. LLM notes
+## 📁 Project Structure
 
-- **Provider:** Groq, via `groq-sdk` (OpenAI-compatible chat completions).
-  Model is env-configurable (`GROQ_MODEL`), defaulting to
-  `llama-3.3-70b-versatile` — a strong, low-cost, low-latency choice for a
-  support agent. Because the LLM sits behind the `LLMProvider` interface,
-  switching to another provider (e.g. OpenAI or Anthropic) is a single new file
-  in `llm/` plus one line in the composition root (`app.ts`).
-- **Prompting:** a single system prompt (`llm/prompt.ts`) combines a concise
-  persona, the store knowledge (injected from `knowledge/faq.ts`), and
-  guardrails — answer only from the provided facts, admit when something is
-  unknown and offer a human, never request sensitive credentials, stay on
-  topic. The last `LLM_HISTORY_LIMIT` messages are sent as context so replies
-  stay coherent across turns.
-- **Cost control / guardrails:** `max_tokens` capped (default 512), history
-  bounded (default 12 messages), a hard request timeout (default 20s), and
-  input length capped server-side (default 4000 chars).
-- **Failure handling:** auth / rate-limit / timeout / connection / generic API
-  errors are each mapped to a distinct friendly message. The user's message is
-  always persisted before the LLM call, so nothing is lost on failure.
-
----
-
-## 7. Trade-offs & "if I had more time"
-
-**Deliberately left out** (to stay in the timebox; documented rather than
-half-built):
-
-- **Streaming responses (SSE).** The single biggest UX upgrade — tokens would
-  appear as they're generated instead of after a pause. The provider interface
-  is already shaped to allow adding a `streamReply` method without disrupting
-  callers.
-- **Tests.** I'd add unit tests for `ChatService` (with a stub `LLMProvider`)
-  and the validation layer first, then a couple of route-level integration
-  tests against a test database.
-- **Retrieval over FAQs.** Fine to inline at this scale; for a real catalogue
-  I'd move knowledge to the DB and add embeddings-based retrieval, swapping
-  only the `knowledge` module.
-- **Rate limiting & abuse protection** (per-IP / per-session), and a Redis
-  cache for hot FAQ answers.
-- **Auth & multi-tenancy**, richer message states (delivered/failed/retry),
-  and persisting a flagged `system` error message server-side.
-
-**Known simplifications:**
-
-- `sessionId` is trusted from the client with no ownership check — fine for a
-  no-auth demo, not for production.
-- Long messages are hard-rejected rather than summarised/truncated; a friendlier
-  product might truncate with a notice.
+```
+├── web/                      # SvelteKit frontend
+│   └── src/
+│       ├── lib/
+│       │   ├── api.ts            # typed API client (SSE streaming)
+│       │   ├── types.ts
+│       │   └── components/       # ChatWidget, MessageBubble, TypingIndicator
+│       └── routes/               # +page.svelte, +layout.svelte
+│
+└── server/                   # Fastify backend
+    ├── prisma/                   # schema.prisma + seed
+    └── src/
+        ├── routes/               # HTTP transport (chat, health)
+        ├── services/             # ChatService — channel-agnostic core
+        ├── llm/                  # LLMProvider interface + Groq + prompt
+        ├── repositories/         # all Prisma/SQL access
+        ├── knowledge/            # FAQ data, injected into the prompt
+        ├── lib/                  # typed errors + zod validation
+        ├── config.ts             # validated env (fail-fast)
+        ├── db.ts                 # Prisma singleton
+        └── app.ts                # composition root (dependency wiring)
+```
 
 ---
 
-## 8. Deployment notes
+## 🔌 API & Streaming
 
-- **Frontend:** Vercel or Netlify (`@sveltejs/adapter-auto` detects the
-  platform). Set `PUBLIC_API_BASE_URL` to the deployed backend URL.
-- **Backend:** Render (or any Node host) with a managed Postgres. Build with
-  `npm run build`, start with `npm start`, run `npx prisma migrate deploy` on
-  release, and set the env vars from section 4. Add the frontend's origin to
-  `CORS_ORIGIN`.
+| Method & path | Description |
+|---|---|
+| `GET /health` | Liveness probe → `{ status: "ok" }` |
+| `POST /chat/message` | Synchronous reply → `{ reply, sessionId }` |
+| `POST /chat/message/stream` | Streamed reply via Server-Sent Events |
+| `GET /chat/:sessionId/history` | Full message history → `{ sessionId, messages }` |
+
+The streaming endpoint sends the session id immediately, then the reply in
+chunks, then a terminal event:
+
+| Event | Data | When |
+|---|---|---|
+| `meta` | `{ sessionId }` | Once, first — before any token |
+| `delta` | `{ text }` | Repeated — the next chunk of the reply |
+| `done` | `{ messageId, sessionId }` | Once, last — reply generated and persisted |
+| `error` | `{ error, message }` | Replaces `done` if generation fails mid-stream |
+
+Because `meta` is sent before generation, a mid-stream failure still leaves the
+client with a usable `sessionId`, and the user's message stays persisted.
+
+```bash
+# watch tokens arrive as Server-Sent Events
+curl -N -X POST http://localhost:3001/chat/message/stream \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"What are your shipping options?"}'
+```
+
+---
+
+## 🤖 How the AI works
+
+A single support agent, kept deliberately simple and behind a clean seam:
+
+1. **Provider interface** — nothing outside `llm/` imports the Groq SDK. The
+   provider is injected into `ChatService`, so swapping models or stubbing it in
+   a test is a one-file change. It exposes both `generateReply` and
+   `generateReplyStream`.
+2. **Prompt** — one system prompt combines a concise persona, the store
+   knowledge (from `knowledge/faq.ts`), and guardrails: answer only from the
+   provided facts, admit unknowns and offer a human, never request sensitive
+   credentials, stay on topic.
+3. **Context** — the last `LLM_HISTORY_LIMIT` messages are sent so replies stay
+   coherent across turns.
+4. **Streaming** — the reply is generated incrementally and relayed over SSE; the
+   client buffers bursty tokens and reveals them at a steady typewriter pace.
+5. **Guardrails** — `max_tokens`, bounded history, a hard request timeout, and a
+   server-side input-length cap keep cost and latency in check. Auth, rate-limit,
+   timeout, connection, and generic API errors each map to a distinct friendly
+   message.
+
+---
+
+## ☁️ Deployment
+
+The two applications deploy independently.
+
+**Frontend → Vercel** (`@sveltejs/adapter-auto` detects the platform)
+- Root Directory: `web`
+- Set `PUBLIC_API_BASE_URL` to the deployed backend URL (baked in at build time).
+- Build is pinned to **Node 20** (`engines` in `web/package.json`).
+
+**Backend → Render** (or any Node host) with a managed Postgres
+- Root Directory: `server`
+- Build: `npm install && npx prisma generate && npm run build`
+- Start: `npm start`
+- Apply migrations on release: `npx prisma migrate deploy`
+- Set the env vars above, and add the frontend's origin to `CORS_ORIGIN`.
+- The stream route sets `Cache-Control: no-transform` and `X-Accel-Buffering: no`
+  so proxies flush events live instead of buffering the whole reply.
+
+---
+
+## 🧭 Roadmap
+
+- **Automated tests** — unit tests for `ChatService` (with a stub provider) and
+  validation, plus route-level integration tests including the SSE stream.
+- **Retrieval over FAQs** — move knowledge to the database with embeddings-based
+  retrieval, swapping only the `knowledge` module.
+- **Rate limiting & abuse protection** (per-IP / per-session) and a cache for hot
+  answers.
+- **Auth & multi-tenancy**, richer message states (delivered / failed / retry).
+
+**Known simplifications**
+- `sessionId` is trusted from the client with no ownership check (fine for a
+  no-auth demo).
+- Streamed replies are persisted without token accounting — the pinned
+  `groq-sdk` doesn't expose usage on stream chunks; the synchronous endpoint
+  records token counts.
+
+---
+
+## 👤 Author
+
+**Afridi Haque**
+
+- Portfolio: [afridih.in](https://afridih.in)
+- LinkedIn: [linkedin.com/in/afridi-haque-851924203](https://www.linkedin.com/in/afridi-haque-851924203/)
+- GitHub: [@Afridi-haque7](https://github.com/Afridi-haque7)
+
+---
+
+## 📄 License
+
+MIT © Afridi Haque

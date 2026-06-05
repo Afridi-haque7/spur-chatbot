@@ -25,6 +25,19 @@ export interface ChatReply {
 }
 
 /**
+ * Events emitted while streaming a reply to a caller (e.g. the SSE route):
+ *   - `meta`  once, first — carries the resolved sessionId,
+ *   - `delta` zero or more times — the next chunk of the AI reply,
+ *   - `done`  once, last — the persisted AI message id.
+ * LLM failures are thrown (not emitted) so callers handle them in one place;
+ * by then `meta` has already been sent, so the client keeps its sessionId.
+ */
+export type ChatStreamEvent =
+  | { type: 'meta'; sessionId: string }
+  | { type: 'delta'; text: string }
+  | { type: 'done'; messageId: string; sessionId: string };
+
+/**
  * The core of the product: turns an incoming message (from ANY channel) into a
  * persisted exchange with an AI reply. The live-chat HTTP route is just one
  * adapter that calls into this; a WhatsApp/Instagram webhook would be another.
@@ -71,6 +84,63 @@ export class ChatService {
     await conversationRepository.touch(conversation.id);
 
     return { reply: result.text, sessionId: conversation.id };
+  }
+
+  /**
+   * Streaming counterpart of `handleIncomingMessage`. Same persistence
+   * guarantees — the user message is saved before generation, and the AI reply
+   * is saved once fully streamed — but the reply is yielded incrementally.
+   */
+  async *streamIncomingMessage(
+    input: IncomingMessage,
+  ): AsyncGenerator<ChatStreamEvent> {
+    const conversation = await this.resolveConversation(input);
+
+    // Read prior context BEFORE inserting the new message (see non-stream path).
+    const priorMessages = await messageRepository.listRecent(
+      conversation.id,
+      config.llm.historyLimit,
+    );
+    const history = toChatTurns(priorMessages);
+
+    // Persist the user message first, so it survives an LLM failure.
+    await messageRepository.create({
+      conversationId: conversation.id,
+      sender: 'user',
+      text: input.text,
+    });
+
+    // Emit sessionId immediately: even if generation fails below, the client
+    // has the id and can keep the conversation.
+    yield { type: 'meta', sessionId: conversation.id };
+
+    let fullText = '';
+    let outputTokens: number | undefined;
+    for await (const event of this.llm.generateReplyStream({
+      systemPrompt: buildSystemPrompt(),
+      history,
+      userMessage: input.text,
+    })) {
+      if (event.type === 'delta') {
+        fullText += event.text;
+        yield { type: 'delta', text: event.text };
+      } else {
+        fullText = event.text; // authoritative, trimmed full text
+        outputTokens = event.outputTokens;
+      }
+    }
+
+    // Persist the completed AI reply (mirrors the non-stream path).
+    const aiMessage = await messageRepository.create({
+      conversationId: conversation.id,
+      sender: 'ai',
+      text: fullText,
+      tokenCount: outputTokens ?? null,
+    });
+
+    await conversationRepository.touch(conversation.id);
+
+    yield { type: 'done', messageId: aiMessage.id, sessionId: conversation.id };
   }
 
   /** Fetch a conversation's full message history for rendering on reload. */

@@ -5,6 +5,7 @@ import type {
   GenerateReplyParams,
   GenerateReplyResult,
   LLMProvider,
+  ReplyStreamEvent,
 } from './provider.js';
 
 /**
@@ -25,10 +26,11 @@ export class GroqProvider implements LLMProvider {
     this.client = new Groq({ apiKey: config.groq.apiKey });
   }
 
-  async generateReply(
+  /** Shape our generic turns into Groq's chat-completions message array. */
+  private buildMessages(
     params: GenerateReplyParams,
-  ): Promise<GenerateReplyResult> {
-    const messages: Groq.Chat.ChatCompletionMessageParam[] = [
+  ): Groq.Chat.ChatCompletionMessageParam[] {
+    return [
       { role: 'system', content: params.systemPrompt },
       ...params.history.map((turn) => ({
         role: turn.role, // 'user' | 'assistant' — same vocabulary as Groq
@@ -36,6 +38,12 @@ export class GroqProvider implements LLMProvider {
       })),
       { role: 'user' as const, content: params.userMessage },
     ];
+  }
+
+  async generateReply(
+    params: GenerateReplyParams,
+  ): Promise<GenerateReplyResult> {
+    const messages = this.buildMessages(params);
 
     try {
       const response = await this.client.chat.completions.create(
@@ -62,6 +70,47 @@ export class GroqProvider implements LLMProvider {
         inputTokens: response.usage?.prompt_tokens,
         outputTokens: response.usage?.completion_tokens,
       };
+    } catch (err) {
+      throw mapGroqError(err);
+    }
+  }
+
+  async *generateReplyStream(
+    params: GenerateReplyParams,
+  ): AsyncGenerator<ReplyStreamEvent> {
+    const messages = this.buildMessages(params);
+
+    try {
+      const stream = await this.client.chat.completions.create(
+        {
+          model: config.groq.model,
+          max_tokens: config.groq.maxTokens,
+          messages,
+          stream: true,
+        },
+        { timeout: config.groq.timeoutMs },
+      );
+
+      // Token usage isn't exposed on the streamed chunks in this SDK version,
+      // so streamed replies are persisted without token accounting.
+      let text = '';
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta?.content ?? '';
+        if (delta) {
+          text += delta;
+          yield { type: 'delta', text: delta };
+        }
+      }
+
+      text = text.trim();
+      if (!text) {
+        throw new LLMError(
+          'Groq returned an empty streamed response.',
+          "Sorry, I couldn't generate a reply just now. Please try again.",
+        );
+      }
+
+      yield { type: 'done', text };
     } catch (err) {
       throw mapGroqError(err);
     }

@@ -25,6 +25,24 @@ export interface GenerateReplyResult {
   outputTokens?: number;
 }
 
+/**
+ * Events emitted while streaming a reply:
+ *   - `delta` carries the next chunk of generated text,
+ *   - `done` arrives once, last, with the full text and token accounting.
+ */
+export type ReplyStreamEvent =
+  | { type: 'delta'; text: string }
+  | { type: 'done'; text: string; inputTokens?: number; outputTokens?: number };
+
 export interface LLMProvider {
   generateReply(params: GenerateReplyParams): Promise<GenerateReplyResult>;
+
+  /**
+   * Same inputs as `generateReply`, but yields the reply incrementally.
+   * Implementations must emit exactly one terminal `done` event carrying the
+   * fully-accumulated text, and translate provider failures into `LLMError`.
+   */
+  generateReplyStream(
+    params: GenerateReplyParams,
+  ): AsyncGenerator<ReplyStreamEvent>;
 }

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { api, ApiError } from '$lib/api';
   import type { ChatMessage } from '$lib/types';
   import MessageBubble from './MessageBubble.svelte';
@@ -8,14 +8,30 @@
   const SESSION_KEY = 'spur-chat-session-id';
   const MAX_LEN = 4000; // mirror of the server limit, for instant UX feedback
 
+  // --- typewriter pacing ---
+  // Network tokens arrive in fast bursts, which reads as "dumping". We buffer
+  // them and reveal characters at a steady cadence so it feels like typing.
+  const REVEAL_TICK_MS = 16; // ~60fps
+  const REVEAL_MIN_CHARS = 2; // baseline chars revealed per tick
+  // When far behind (a big burst arrived), reveal proportionally more so long
+  // replies don't drag on, while still never dumping everything at once.
+  const REVEAL_CATCHUP_DIVISOR = 60;
+
   // --- state ---
   let messages = $state<ChatMessage[]>([]);
   let input = $state('');
   let sending = $state(false);
+  // The AI reply as it streams in; rendered in a live bubble until complete.
+  let streamingText = $state('');
   let loadingHistory = $state(true);
   let errorBanner = $state<string | null>(null);
   let sessionId: string | undefined;
   let listEl: HTMLDivElement;
+
+  // Typewriter buffers (non-reactive: only `streamingText` drives the UI).
+  let targetText = ''; // everything received from the server so far
+  let streamClosed = false; // server finished sending
+  let revealCancelled = false; // abort the reveal loop (error/unmount)
 
   const trimmed = $derived(input.trim());
   const canSend = $derived(trimmed.length > 0 && trimmed.length <= MAX_LEN && !sending);
@@ -24,6 +40,36 @@
   async function scrollToBottom() {
     await tick();
     listEl?.scrollTo({ top: listEl.scrollHeight, behavior: 'smooth' });
+  }
+
+  // Instant scroll, used during the high-frequency reveal loop (smooth scroll
+  // every frame would fight itself and stutter).
+  function pinToBottom() {
+    listEl?.scrollTo({ top: listEl.scrollHeight });
+  }
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  /**
+   * Reveal `targetText` into `streamingText` a few characters at a time.
+   * Runs until the text is fully shown AND the server has closed the stream,
+   * or until cancelled. Returns when there's nothing left to animate.
+   */
+  async function runReveal() {
+    while (!revealCancelled) {
+      const remaining = targetText.length - streamingText.length;
+      if (remaining > 0) {
+        const step = Math.max(
+          REVEAL_MIN_CHARS,
+          Math.ceil(remaining / REVEAL_CATCHUP_DIVISOR),
+        );
+        streamingText = targetText.slice(0, streamingText.length + step);
+        pinToBottom();
+      } else if (streamClosed) {
+        return; // caught up and nothing more is coming
+      }
+      await sleep(REVEAL_TICK_MS);
+    }
   }
 
   onMount(async () => {
@@ -42,6 +88,11 @@
     await scrollToBottom();
   });
 
+  // Stop any in-flight reveal loop if the widget is torn down mid-stream.
+  onDestroy(() => {
+    revealCancelled = true;
+  });
+
   async function send() {
     if (!canSend) return;
     const text = trimmed;
@@ -55,24 +106,49 @@
       { id: tempId, sender: 'user', text, createdAt: new Date().toISOString() },
     ];
     sending = true;
+    streamingText = '';
+    targetText = '';
+    streamClosed = false;
+    revealCancelled = false;
     await scrollToBottom();
 
+    // Start the typewriter animation; tokens land in `targetText` and the loop
+    // reveals them at a steady pace, independent of how bursty the network is.
+    const reveal = runReveal();
+
     try {
-      const res = await api.sendMessage(text, sessionId);
-      if (!sessionId) {
-        sessionId = res.sessionId;
-        localStorage.setItem(SESSION_KEY, res.sessionId);
-      }
-      messages = [
-        ...messages,
-        {
-          id: `ai-${Date.now()}`,
-          sender: 'ai',
-          text: res.reply,
-          createdAt: new Date().toISOString(),
+      await api.sendMessageStream(text, sessionId, {
+        onMeta: (sid) => {
+          if (!sessionId) {
+            sessionId = sid;
+            localStorage.setItem(SESSION_KEY, sid);
+          }
         },
-      ];
+        onDelta: (chunk) => {
+          targetText += chunk;
+        },
+      });
+      // Server done: let the animation drain the rest before committing.
+      streamClosed = true;
+      await reveal;
+
+      const finalText = targetText;
+      streamingText = ''; // remove the live bubble in the same tick as commit
+      if (finalText) {
+        messages = [
+          ...messages,
+          {
+            id: `ai-${Date.now()}`,
+            sender: 'ai',
+            text: finalText,
+            createdAt: new Date().toISOString(),
+          },
+        ];
+      }
     } catch (err) {
+      // Stop the animation immediately; we'll show an error instead.
+      revealCancelled = true;
+      await reveal;
       const msg =
         err instanceof ApiError
           ? err.message
@@ -89,6 +165,9 @@
       ];
       errorBanner = msg;
     } finally {
+      revealCancelled = true; // ensure the loop is stopped
+      streamingText = '';
+      targetText = '';
       sending = false;
       await scrollToBottom();
     }
@@ -125,7 +204,11 @@
       <MessageBubble sender={m.sender} text={m.text} error={m.sender === 'system'} />
     {/each}
 
-    {#if sending}
+    {#if sending && streamingText}
+      <!-- Live AI reply, updated as tokens stream in. -->
+      <MessageBubble sender="ai" text={streamingText} />
+    {:else if sending}
+      <!-- Waiting for the first token. -->
       <TypingIndicator />
     {/if}
   </div>

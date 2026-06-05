@@ -55,6 +55,72 @@ export const api = {
     return (await res.json()) as SendMessageResponse;
   },
 
+  /**
+   * Send a message and stream the AI reply token-by-token.
+   *
+   * Resolves once the reply is fully streamed and persisted. Throws `ApiError`
+   * on a network failure, a non-2xx response, or a server-sent `error` event —
+   * so callers handle failures the same way as `sendMessage`.
+   */
+  async sendMessageStream(
+    message: string,
+    sessionId: string | undefined,
+    handlers: {
+      onMeta?: (sessionId: string) => void;
+      onDelta?: (text: string) => void;
+    },
+  ): Promise<void> {
+    let res: Response;
+    try {
+      res = await fetch(`${BASE_URL}/chat/message/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, sessionId }),
+      });
+    } catch {
+      throw new ApiError(
+        "I couldn't reach the server. Check your connection and try again.",
+        'network_error',
+      );
+    }
+
+    // A validation/early error comes back as a normal JSON response, not SSE.
+    if (!res.ok || !res.body) throw await parseError(res);
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    // SSE frames are separated by a blank line; parse them as they arrive.
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      let sep: number;
+      while ((sep = buffer.indexOf('\n\n')) !== -1) {
+        const frame = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        const { event, data } = parseSseFrame(frame);
+        if (!event) continue;
+
+        if (event === 'meta') {
+          handlers.onMeta?.(data.sessionId as string);
+        } else if (event === 'delta') {
+          handlers.onDelta?.(data.text as string);
+        } else if (event === 'error') {
+          throw new ApiError(
+            (data.message as string) ??
+              'Something went wrong. Please try again.',
+            (data.error as string) ?? 'unknown',
+          );
+        } else if (event === 'done') {
+          return;
+        }
+      }
+    }
+  },
+
   /** Fetch full history for a session to render on reload. */
   async getHistory(sessionId: string): Promise<HistoryResponse> {
     const res = await fetch(
@@ -64,3 +130,25 @@ export const api = {
     return (await res.json()) as HistoryResponse;
   },
 };
+
+/** Parse one SSE frame ("event: x\ndata: {...}") into its event name + data. */
+function parseSseFrame(frame: string): {
+  event: string | null;
+  data: Record<string, unknown>;
+} {
+  let event: string | null = null;
+  let dataRaw = '';
+  for (const line of frame.split('\n')) {
+    if (line.startsWith('event:')) event = line.slice(6).trim();
+    else if (line.startsWith('data:')) dataRaw += line.slice(5).trim();
+  }
+  let data: Record<string, unknown> = {};
+  if (dataRaw) {
+    try {
+      data = JSON.parse(dataRaw) as Record<string, unknown>;
+    } catch {
+      // Ignore malformed data payloads; treat as an empty object.
+    }
+  }
+  return { event, data };
+}
